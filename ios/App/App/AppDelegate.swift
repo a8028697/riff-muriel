@@ -87,7 +87,8 @@ public class MurielAudioSessionPlugin: CAPPlugin, CAPBridgedPlugin {
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "setMix", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getMix", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getState", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "getState", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "reactivate", returnType: CAPPluginReturnPromise)
     ]
     private var awake: UIBackgroundTaskIdentifier = .invalid
     private var awakeEnd: DispatchWorkItem?
@@ -118,6 +119,18 @@ public class MurielAudioSessionPlugin: CAPPlugin, CAPBridgedPlugin {
         ])
     }
 
+    // after another app (a game) cut Muriel off: take the audio session back, mixing with it, so playback can start again
+    @objc func reactivate(_ call: CAPPluginCall) {
+        let s = AVAudioSession.sharedInstance()
+        do {
+            try s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try s.setActive(true)
+            call.resolve(["ok": true])
+        } catch {
+            call.resolve(["ok": false, "error": error.localizedDescription])
+        }
+    }
+
     override public func load() {
         // WebKit may reset the audio session when a song starts: while "Play over games" is on, put the mix option back
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
@@ -133,6 +146,7 @@ public class MurielAudioSessionPlugin: CAPPlugin, CAPBridgedPlugin {
                   let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
             switch type {
             case .began:
+                if UserDefaults.standard.bool(forKey: "murielMixWithOthers") { self.stayAwake(seconds: 20) }
                 self.notifyListeners("interruption", data: ["type": "began"])
             case .ended:
                 let opts = AVAudioSession.InterruptionOptions(rawValue: note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
