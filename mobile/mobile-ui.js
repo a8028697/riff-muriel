@@ -307,6 +307,32 @@
       else setTimeout(hookAudio, 1000);
     };
     hookAudio();
+    // a game cut the song off: take the audio session back (mixing) and start the song again, a few tries
+    let lastPlayingAt = 0;
+    let resumeNote = '';
+    const trackPlaying = () => {
+      const core = window.MurielCore;
+      if (core && core.audio) {
+        ['playing', 'timeupdate'].forEach((ev) => core.audio.addEventListener(ev, () => { if (!core.audio.paused) lastPlayingAt = Date.now(); }));
+      } else setTimeout(trackPlaying, 1000);
+    };
+    trackPlaying();
+    AS.addListener('interruption', (e) => {
+      if (!e || e.type !== 'began' || !sw.classList.contains('active')) return;
+      const core = window.MurielCore;
+      if (!core || !core.audio || (core.state && core.state.pausedByUser)) return;
+      if (Date.now() - lastPlayingAt > 3000) return;
+      [400, 1500, 3500].forEach((ms, i) => setTimeout(() => {
+        if (!core.audio.paused || (core.state && core.state.pausedByUser)) return;
+        AS.reactivate().then((r) => {
+          resumeNote = ' | resume try ' + (i + 1) + ': ' + (r && r.ok ? 'session ok' : 'session failed ' + ((r && r.error) || ''));
+          return core.audio.play();
+        }).then(() => { resumeNote += ', playing'; }).catch((err) => { resumeNote += ', play failed ' + (err && err.name || ''); });
+      }, ms));
+    });
+    // show what happened in the status line
+    const baseShow = showState;
+    setInterval(() => { if (resumeNote && !document.hidden) { stateEl.textContent += resumeNote; } }, 2100);
     addPlaybackRow(row);
   }
 
