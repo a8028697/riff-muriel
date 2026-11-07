@@ -12,7 +12,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // Music app: keep playing with the screen locked or the app in the background,
         // and ignore the silent switch. The session is not activated here: that would stop other
         // apps' audio the moment Muriel opens; WebKit activates it when a song starts.
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+        // "Play over games" (Settings → Tracks → Playback): mix with other apps' audio instead of stopping it.
+        let mix = UserDefaults.standard.bool(forKey: "murielMixWithOthers")
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: mix ? [.mixWithOthers] : [])
         return true
     }
 
@@ -82,9 +84,28 @@ class MurielBridgeViewController: CAPBridgeViewController {
 public class MurielAudioSessionPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "MurielAudioSessionPlugin"
     public let jsName = "MurielAudioSession"
-    public let pluginMethods: [CAPPluginMethod] = []
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "setMix", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getMix", returnType: CAPPluginReturnPromise)
+    ]
     private var awake: UIBackgroundTaskIdentifier = .invalid
     private var awakeEnd: DispatchWorkItem?
+
+    // "Play over games": mix with other apps' audio (on) or take over the audio like a normal music app (off)
+    @objc func setMix(_ call: CAPPluginCall) {
+        let on = call.getBool("enabled") ?? false
+        UserDefaults.standard.set(on, forKey: "murielMixWithOthers")
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: on ? [.mixWithOthers] : [])
+            call.resolve(["enabled": on])
+        } catch {
+            call.reject("setCategory failed")
+        }
+    }
+
+    @objc func getMix(_ call: CAPPluginCall) {
+        call.resolve(["enabled": UserDefaults.standard.bool(forKey: "murielMixWithOthers")])
+    }
 
     override public func load() {
         NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
