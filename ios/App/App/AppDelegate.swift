@@ -86,7 +86,8 @@ public class MurielAudioSessionPlugin: CAPPlugin, CAPBridgedPlugin {
     public let jsName = "MurielAudioSession"
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "setMix", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getMix", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "getMix", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getState", returnType: CAPPluginReturnPromise)
     ]
     private var awake: UIBackgroundTaskIdentifier = .invalid
     private var awakeEnd: DispatchWorkItem?
@@ -107,7 +108,25 @@ public class MurielAudioSessionPlugin: CAPPlugin, CAPBridgedPlugin {
         call.resolve(["enabled": UserDefaults.standard.bool(forKey: "murielMixWithOthers")])
     }
 
+    // what the system really has right now (for the status line under "Play over games")
+    @objc func getState(_ call: CAPPluginCall) {
+        let s = AVAudioSession.sharedInstance()
+        call.resolve([
+            "category": s.category.rawValue,
+            "mix": s.categoryOptions.contains(.mixWithOthers),
+            "otherAudio": s.isOtherAudioPlaying
+        ])
+    }
+
     override public func load() {
+        // WebKit may reset the audio session when a song starts: while "Play over games" is on, put the mix option back
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            guard UserDefaults.standard.bool(forKey: "murielMixWithOthers") else { return }
+            let s = AVAudioSession.sharedInstance()
+            if !s.categoryOptions.contains(.mixWithOthers) {
+                try? s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            }
+        }
         NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             guard let self = self,
                   let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
