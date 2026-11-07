@@ -292,6 +292,14 @@
       sw.classList.toggle('active', on);
       AS.setMix({ enabled: on }).catch(() => sw.classList.toggle('active', !on));
     });
+    // WebKit can reset the audio session when a song starts: set the mix option again each time it plays
+    const reassert = () => { if (sw.classList.contains('active')) AS.setMix({ enabled: true }).catch(() => {}); };
+    const hookAudio = () => {
+      const core = window.MurielCore;
+      if (core && core.audio) core.audio.addEventListener('playing', reassert);
+      else setTimeout(hookAudio, 1000);
+    };
+    hookAudio();
     addPlaybackRow(row);
   }
 
