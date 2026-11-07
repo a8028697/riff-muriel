@@ -282,15 +282,22 @@
         <div style="display: flex; flex-direction: column; gap: 2px;">
           <span class="setting-name">Play over games</span>
           <span style="font-size: calc(12px * var(--font-scale, 1)); color: var(--md-sys-color-outline);">Keep playing without interrupting other apps. The lock screen controls may disappear.</span>
+          <span class="mix-state" style="font-size: calc(12px * var(--font-scale, 1)); color: var(--md-sys-color-outline);"></span>
         </div>
         <button class="effect-switch-btn" type="button" aria-label="Play over games"><span class="thumb"></span></button>
       </div>`;
     const sw = row.querySelector('button');
+    const stateEl = row.querySelector('.mix-state');
+    const showState = () => AS.getState().then((st) => {
+      stateEl.textContent = 'Status: ' + String(st.category).replace('AVAudioSessionCategory', '') + ', mix ' + (st.mix ? 'ON' : 'OFF') + (st.otherAudio ? ', other app playing' : '');
+    }).catch(() => { stateEl.textContent = 'Status: unavailable'; });
+    setInterval(() => { if (!document.hidden) showState(); }, 2000);
     AS.getMix().then((r) => sw.classList.toggle('active', !!(r && r.enabled))).catch(() => {});
+    showState();
     sw.addEventListener('click', () => {
       const on = !sw.classList.contains('active');
       sw.classList.toggle('active', on);
-      AS.setMix({ enabled: on }).catch(() => sw.classList.toggle('active', !on));
+      AS.setMix({ enabled: on }).then(showState).catch(() => sw.classList.toggle('active', !on));
     });
     // WebKit can reset the audio session when a song starts: set the mix option again each time it plays
     const reassert = () => { if (sw.classList.contains('active')) AS.setMix({ enabled: true }).catch(() => {}); };
