@@ -272,6 +272,29 @@
     addPlaybackRow(row);
   }
 
+  // iPhone: play together with other apps (games) instead of stopping them (native MurielAudioSession.setMix)
+  if (window.Capacitor && window.Capacitor.getPlatform && window.Capacitor.getPlatform() === 'ios' && trRow) {
+    const AS = (window.Capacitor.Plugins && window.Capacitor.Plugins.MurielAudioSession) || window.Capacitor.registerPlugin('MurielAudioSession');
+    const row = document.createElement('div');
+    row.className = 'setting-item';
+    row.innerHTML = `
+      <div class="setting-item-top" style="align-items: center;">
+        <div style="display: flex; flex-direction: column; gap: 2px;">
+          <span class="setting-name">Play over games</span>
+          <span style="font-size: calc(12px * var(--font-scale, 1)); color: var(--md-sys-color-outline);">Keep playing without interrupting other apps. The lock screen controls may disappear.</span>
+        </div>
+        <button class="effect-switch-btn" type="button" aria-label="Play over games"><span class="thumb"></span></button>
+      </div>`;
+    const sw = row.querySelector('button');
+    AS.getMix().then((r) => sw.classList.toggle('active', !!(r && r.enabled))).catch(() => {});
+    sw.addEventListener('click', () => {
+      const on = !sw.classList.contains('active');
+      sw.classList.toggle('active', on);
+      AS.setMix({ enabled: on }).catch(() => sw.classList.toggle('active', !on));
+    });
+    addPlaybackRow(row);
+  }
+
   // Android: let Muriel off battery optimization so the phone doesn't stop it in the background (media-controls.js)
   if (window.MurielBackground && trRow) {
     const bg = window.MurielBackground;
