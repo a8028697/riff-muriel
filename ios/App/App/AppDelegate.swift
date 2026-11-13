@@ -1,6 +1,5 @@
 import UIKit
 import AVFoundation
-import MediaPlayer
 import WebKit
 import Capacitor
 
@@ -134,22 +133,12 @@ public class MurielAudioSessionPlugin: CAPPlugin, CAPBridgedPlugin {
 
     override public func load() {
         // WebKit may reset the audio session when a song starts: while "Play over games" is on, put the mix option back
-        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
             guard UserDefaults.standard.bool(forKey: "murielMixWithOthers") else { return }
             let s = AVAudioSession.sharedInstance()
             if !s.categoryOptions.contains(.mixWithOthers) {
                 try? s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             }
-            // experiment: hide Muriel from Control Center / the lock screen so the system does not treat it as
-            // "the" now-playing app (WebKit puts the info back on every song change, so clear it again here)
-            let center = MPNowPlayingInfoCenter.default()
-            if center.nowPlayingInfo != nil { center.nowPlayingInfo = nil }
-            let rc = MPRemoteCommandCenter.shared()
-            let commands: [MPRemoteCommand] = [rc.playCommand, rc.pauseCommand, rc.togglePlayPauseCommand,
-                                               rc.nextTrackCommand, rc.previousTrackCommand,
-                                               rc.changePlaybackPositionCommand, rc.seekForwardCommand,
-                                               rc.seekBackwardCommand, rc.skipForwardCommand, rc.skipBackwardCommand]
-            for c in commands where c.isEnabled { c.isEnabled = false }
         }
         NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             guard let self = self,
