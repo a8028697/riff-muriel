@@ -1,5 +1,6 @@
 import UIKit
 import AVFoundation
+import MediaPlayer
 import WebKit
 import Capacitor
 
@@ -72,6 +73,7 @@ class MurielBridgeViewController: CAPBridgeViewController {
     override open func capacitorDidLoad() {
         bridge?.registerPluginInstance(MurielLiveActivityPlugin())
         bridge?.registerPluginInstance(MurielAudioSessionPlugin())
+        bridge?.registerPluginInstance(MurielNativePlayerPlugin())
     }
 }
 
@@ -139,6 +141,14 @@ public class MurielAudioSessionPlugin: CAPPlugin, CAPBridgedPlugin {
             if !s.categoryOptions.contains(.mixWithOthers) {
                 try? s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             }
+            // experiment: keep the Control Center / Dynamic Island card at 0:01 and "playing" (like an old MixerBox bug
+            // that games could not silence); whoever sets the info (WebKit or the native player) gets overwritten each second
+            let center = MPNowPlayingInfoCenter.default()
+            if var info = center.nowPlayingInfo {
+                info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 1.0
+                info[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
+                center.nowPlayingInfo = info
+            }
         }
         NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             guard let self = self,
@@ -175,5 +185,239 @@ public class MurielAudioSessionPlugin: CAPPlugin, CAPBridgedPlugin {
         guard awake != .invalid else { return }
         UIApplication.shared.endBackgroundTask(awake)
         awake = .invalid
+    }
+}
+
+
+// Native player (Settings → Tracks → Playback → "Native player"). The song is played by AVPlayer inside the app
+// instead of the web view's <audio>, so iOS treats Muriel like any other music app (and our audio session settings,
+// like "Play over games", apply to it exactly). The page keeps its player object and forwards to this plugin
+// (mobile-ui.js), so the rest of the app does not change. There is no Web Audio chain in this mode: no equalizer or effects.
+@objc(MurielNativePlayerPlugin)
+public class MurielNativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
+    public let identifier = "MurielNativePlayerPlugin"
+    public let jsName = "MurielNativePlayer"
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "load", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "play", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "pause", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "seek", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stop", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setVolume", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setRate", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setNowPlaying", returnType: CAPPluginReturnPromise)
+    ]
+
+    private var player: AVPlayer?
+    private var item: AVPlayerItem?
+    private var loadId = 0
+    private var timeObserver: Any?
+    private var observers: [NSKeyValueObservation] = []
+    private var endObserver: NSObjectProtocol?
+    private var stallObserver: NSObjectProtocol?
+    private var volume: Float = 1
+    private var rate: Float = 1
+    private var preservePitch = true
+    private var remoteReady = false
+
+    // every event goes to the page on one channel; "id" lets the page ignore events of a song it already left
+    private func emit(_ name: String, _ extra: [String: Any] = [:]) {
+        var data: [String: Any] = ["name": name, "id": loadId]
+        for (k, v) in extra { data[k] = v }
+        if Thread.isMainThread {
+            notifyListeners("evt", data: data)
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.notifyListeners("evt", data: data) }
+        }
+    }
+
+    private func finite(_ v: Double) -> Double { v.isFinite ? v : 0 }
+
+    private func teardown() {
+        if let o = timeObserver { player?.removeTimeObserver(o) }
+        timeObserver = nil
+        observers.forEach { $0.invalidate() }
+        observers.removeAll()
+        if let e = endObserver { NotificationCenter.default.removeObserver(e) }
+        if let s = stallObserver { NotificationCenter.default.removeObserver(s) }
+        endObserver = nil
+        stallObserver = nil
+        player?.pause()
+        player = nil
+        item = nil
+    }
+
+    @objc func load(_ call: CAPPluginCall) {
+        guard let s = call.getString("url"), !s.isEmpty else { call.reject("no url"); return }
+        let id = call.getInt("id") ?? 0
+        let headers = call.options["headers"] as? [String: String]
+        DispatchQueue.main.async {
+            self.teardown()
+            self.loadId = id
+            let url: URL
+            if s.hasPrefix("/") {
+                url = URL(fileURLWithPath: s)
+            } else if let u = URL(string: s) {
+                url = u
+            } else {
+                call.reject("bad url")
+                return
+            }
+            var options: [String: Any]? = nil
+            if let h = headers, !h.isEmpty { options = ["AVURLAssetHTTPHeaderFieldsKey": h] }
+            let asset = AVURLAsset(url: url, options: options)
+            let item = AVPlayerItem(asset: asset)
+            item.audioTimePitchAlgorithm = self.preservePitch ? .spectral : .varispeed
+            let player = AVPlayer(playerItem: item)
+            player.automaticallyWaitsToMinimizeStalling = true
+            player.volume = self.volume
+            player.defaultRate = self.rate
+            self.player = player
+            self.item = item
+            self.observe(player, item)
+            self.setupRemote()
+            call.resolve()
+        }
+    }
+
+    private func observe(_ player: AVPlayer, _ item: AVPlayerItem) {
+        observers.append(item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard let self = self else { return }
+            switch item.status {
+            case .readyToPlay:
+                let d = item.duration.seconds
+                self.emit("meta", ["d": d.isFinite ? d : -1])
+            case .failed:
+                self.emit("error", ["message": item.error?.localizedDescription ?? "failed"])
+            default:
+                break
+            }
+        })
+        observers.append(item.observe(\.duration, options: [.new]) { [weak self] item, _ in
+            let d = item.duration.seconds
+            if d.isFinite && d > 0 { self?.emit("duration", ["d": d]) }
+        })
+        observers.append(player.observe(\.timeControlStatus, options: [.new]) { [weak self] p, _ in
+            switch p.timeControlStatus {
+            case .playing: self?.emit("playing")
+            case .waitingToPlayAtSpecifiedRate: self?.emit("waiting")
+            case .paused: self?.emit("paused")
+            @unknown default: break
+            }
+        })
+        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] t in
+            guard let self = self, let it = self.item else { return }
+            let d = it.duration.seconds
+            self.emit("time", ["t": self.finite(t.seconds), "d": d.isFinite ? d : -1, "rate": Double(self.player?.rate ?? 0)])
+        }
+        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+            self?.emit("ended")
+        }
+        stallObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemPlaybackStalled, object: item, queue: .main) { [weak self] _ in
+            self?.emit("stalled")
+        }
+    }
+
+    @objc func play(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            try? AVAudioSession.sharedInstance().setActive(true)
+            self.player?.play()
+            call.resolve()
+        }
+    }
+
+    @objc func pause(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            self.player?.pause()
+            call.resolve()
+        }
+    }
+
+    @objc func seek(_ call: CAPPluginCall) {
+        let t = call.getDouble("time") ?? 0
+        DispatchQueue.main.async {
+            guard let p = self.player else { call.resolve(); return }
+            p.seek(to: CMTime(seconds: max(0, t), preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+                call.resolve()
+            }
+        }
+    }
+
+    @objc func stop(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            self.teardown()
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            call.resolve()
+        }
+    }
+
+    @objc func setVolume(_ call: CAPPluginCall) {
+        let v = Float(min(1, max(0, call.getDouble("volume") ?? 1)))
+        DispatchQueue.main.async {
+            self.volume = v
+            self.player?.volume = v
+            call.resolve()
+        }
+    }
+
+    @objc func setRate(_ call: CAPPluginCall) {
+        let r = Float(min(4, max(0.1, call.getDouble("rate") ?? 1)))
+        let keepPitch = call.getBool("preservePitch") ?? true
+        DispatchQueue.main.async {
+            self.rate = r
+            self.preservePitch = keepPitch
+            self.item?.audioTimePitchAlgorithm = keepPitch ? .spectral : .varispeed
+            self.player?.defaultRate = r
+            if let p = self.player, p.timeControlStatus != .paused { p.rate = r }
+            call.resolve()
+        }
+    }
+
+    // title / artist / position for the lock screen and Control Center (the page sends them; no artwork yet)
+    @objc func setNowPlaying(_ call: CAPPluginCall) {
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: call.getString("title") ?? "",
+            MPMediaItemPropertyArtist: call.getString("artist") ?? "",
+            MPMediaItemPropertyAlbumTitle: call.getString("album") ?? "",
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: call.getDouble("position") ?? 0,
+            MPNowPlayingInfoPropertyPlaybackRate: call.getDouble("rate") ?? 0
+        ]
+        if let d = call.getDouble("duration"), d > 0 { info[MPMediaItemPropertyPlaybackDuration] = d }
+        DispatchQueue.main.async {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+            call.resolve()
+        }
+    }
+
+    // lock screen / Control Center / headphone buttons: forwarded to the page, which runs its own play / next / previous
+    private func remote(_ data: [String: Any]) {
+        DispatchQueue.main.async { [weak self] in self?.notifyListeners("remote", data: data) }
+    }
+
+    private func setupRemote() {
+        if remoteReady { return }
+        remoteReady = true
+        let rc = MPRemoteCommandCenter.shared()
+        let map: [(MPRemoteCommand, String)] = [
+            (rc.playCommand, "play"),
+            (rc.pauseCommand, "pause"),
+            (rc.togglePlayPauseCommand, "toggle"),
+            (rc.nextTrackCommand, "next"),
+            (rc.previousTrackCommand, "prev")
+        ]
+        for (cmd, name) in map {
+            cmd.isEnabled = true
+            cmd.addTarget { [weak self] _ in
+                self?.remote(["action": name])
+                return .success
+            }
+        }
+        rc.changePlaybackPositionCommand.isEnabled = true
+        rc.changePlaybackPositionCommand.addTarget { [weak self] event in
+            if let e = event as? MPChangePlaybackPositionCommandEvent {
+                self?.remote(["action": "seek", "time": e.positionTime])
+            }
+            return .success
+        }
     }
 }
