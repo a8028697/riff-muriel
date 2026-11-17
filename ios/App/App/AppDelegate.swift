@@ -141,10 +141,11 @@ public class MurielAudioSessionPlugin: CAPPlugin, CAPBridgedPlugin {
             if !s.categoryOptions.contains(.mixWithOthers) {
                 try? s.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             }
-            // experiment: keep the Control Center / Dynamic Island card at 0:01 and "playing" (like an old MixerBox bug
+            // experiment: keep the Control Center / Dynamic Island card at 0:01 of 0:01 (track length 1 s, position at its end) and "playing" (like an old MixerBox bug
             // that games could not silence); whoever sets the info (WebKit or the native player) gets overwritten each second
             let center = MPNowPlayingInfoCenter.default()
             if var info = center.nowPlayingInfo {
+                info[MPMediaItemPropertyPlaybackDuration] = 1.0
                 info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 1.0
                 info[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
                 center.nowPlayingInfo = info
